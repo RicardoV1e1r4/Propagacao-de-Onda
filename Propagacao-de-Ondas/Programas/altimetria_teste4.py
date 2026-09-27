@@ -10,7 +10,7 @@ from rasterio.plot import show
 import matplotlib.pyplot as plt
 
 # 1. Caminho para o seu arquivo TIFF de relevo
-caminho_arquivo = "C:/Users/Ricardo Alexandre/Downloads/rasters_COP30_02/output_hh.tif"
+caminho_arquivo = "D:/Documentos/Engenharia/8º Período/Propagação de Ondas/Programas feitos pelo Ricardo/Arquivos dos relevos/rasters_COP30_02/output_hh.tif"
 
 # 2. Abrir o arquivo usando o Rasterio
 with rasterio.open(caminho_arquivo) as src:
