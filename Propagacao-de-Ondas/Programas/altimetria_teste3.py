@@ -1,105 +1,253 @@
 import osmnx as ox
 import rasterio
 from rasterio.features import rasterize
+from rasterio.warp import reproject
+from rasterio.enums import Resampling
+from rasterio.transform import from_bounds
 import numpy as np
 import matplotlib.pyplot as plt
 
-# Evita bloqueios de API (Erro 403)
-ox.settings.log_console = False
+# ============================================================
+# CONFIGURAÇÕES
+# ============================================================
+
+ox.settings.log_console = True
 ox.settings.use_cache = True
-ox.settings.user_agent = "SimulacaoRadio_Ricardo/2.0"
 
-# =============================================================================
-# PASSO 1: DEFINA SUAS COORDENADAS PERSONALIZADAS (WGS84)
-# =============================================================================
-# DICA: Você pode pegar essas coordenadas facilmente desenhando um retângulo no site bboxfinder.com
-# Exemplo atual: Um recorte cobrindo o Centro do Rio de Janeiro
+ox.settings.http_user_agent = "SimulacaoRadio_Ricardo/2.0"
 
+ox.settings.overpass_url = "https://overpass.private.coffee/api"
+
+ox.settings.requests_timeout = 180
+
+ox.settings.overpass_rate_limit = False
+
+# Bounding box - WGS84
 oeste = -43.189
 sul   = -22.909
 leste = -43.175
 norte = -22.899
 
-print("1. Baixando os edifícios dentro da sua caixa delimitadora...")
-# Baixa as geometrias diretamente pelas coordenadas limites fornecidas
+# Resolução espacial
+resolucao = 2.0  # metros
+
+# Arquivo do MDT
+arquivo_mdt = "mdt.tif"
+
+# ============================================================
+# 1. DOWNLOAD DOS PRÉDIOS
+# ============================================================
+
+print("1. Baixando edifícios do OpenStreetMap...")
+
+# OSMnx 2.x:
+# (west, south, east, north)
+
 coord_tupla = (oeste, sul, leste, norte)
-predios = ox.features_from_bbox(coord_tupla, tags={"building": True})
 
-# Tratamento padrão de altura 2.5D
-if 'height' in predios.columns:
-    predios['altura_m'] = predios['height'].fillna(12.0).apply(lambda x: float(str(x).replace('m', '').strip()) if x else 12.0)
-else:
-    predios['altura_m'] = 12.0
+predios = ox.features_from_bbox(
+    bbox=coord_tupla,
+    tags={"building": True}
+)
 
-print(f"Foram encontrados {len(predios)} prédios na área delimitada.")
+print(f"Prédios encontrados: {len(predios)}")
 
-# =============================================================================
-# PASSO 2: CRIAÇÃO DA GRADE EM METROS
-# =============================================================================
-print("2. Projetando a área para coordenadas métricas...")
-predios_metros = predios.to_crs(epsg=3857)
-bbox = predios_metros.total_bounds  # [minx, miny, maxx, maxy] em metros
+# ============================================================
+# 2. DETERMINAÇÃO DAS ALTURAS
+# ============================================================
 
-# Resolução da grade (2 metros por pixel)
-resolucao = 2.0  
-largura_metros = bbox[2] - bbox[0]
-altura_metros = bbox[3] - bbox[1]
+def obter_altura(row):
+    # ----------------------------------
+    # Primeiro: altura explícita
+    # ----------------------------------
 
-cols = int(largura_metros / resolucao)
-rows = int(altura_metros / resolucao)
+    if row.get("height") is not None:
+        try:
+            valor = str(row["height"]).lower()
+            valor = valor.replace("m", "")
+            valor = valor.strip()
 
-transform = rasterio.transform.from_bounds(*bbox, width=cols, height=rows)
+            return float(valor)
 
-# =============================================================================
-# PASSO 3: RASTERIZAÇÃO DOS PRÉDIOS
-# =============================================================================
-print("3. Gerando matriz numérica dos obstáculos (Prédios)...")
+        except (ValueError, TypeError):
+            pass
+
+
+    # ----------------------------------
+    # Segundo: número de pavimentos
+    # ----------------------------------
+
+    if row.get("building:levels") is not None:
+        try:
+            niveis = float(row["building:levels"])
+
+            # aproximadamente 3 m por pavimento
+            return niveis * 3.0
+
+        except (ValueError, TypeError):
+            pass
+
+
+    # ----------------------------------
+    # Terceiro: valor padrão
+    # ----------------------------------
+
+    return 12.0
+
+
+predios["altura_m"] = predios.apply(obter_altura, axis=1)
+
+print(
+    f"Altura média estimada: "
+    f"{predios['altura_m'].mean():.2f} m"
+)
+
+
+# ============================================================
+# 3. PROJEÇÃO MÉTRICA
+# ============================================================
+
+print("2. Projetando para SIRGAS 2000 / UTM 23S...")
+
+predios_metros = predios.to_crs(epsg=31983)
+
+bbox_metros = predios_metros.total_bounds
+
+xmin, ymin, xmax, ymax = bbox_metros
+
+largura_metros = xmax - xmin
+altura_metros  = ymax - ymin
+
+cols = int(np.ceil(largura_metros / resolucao))
+rows = int(np.ceil(altura_metros / resolucao))
+
+transform = from_bounds(
+    xmin,
+    ymin,
+    xmax,
+    ymax,
+    cols,
+    rows
+)
+
+print(f"Área: {largura_metros:.1f} × {altura_metros:.1f} m")
+print(f"Grade: {cols} × {rows}")
+
+
+# ============================================================
+# 4. RASTERIZAÇÃO DOS PRÉDIOS
+# ============================================================
+
+print("3. Rasterizando prédios...")
+
 matriz_predios = rasterize(
-    [(geom, alt) for geom, alt in zip(predios_metros.geometry, predios_metros['altura_m'])],
+    [
+        (geom, altura)
+        for geom, altura
+        in zip(
+            predios_metros.geometry,
+            predios_metros["altura_m"]
+        )
+        if geom is not None and not geom.is_empty
+    ],
     out_shape=(rows, cols),
     transform=transform,
     fill=0,
-    dtype='float32'
+    dtype="float32"
 )
 
-# =============================================================================
-# PASSO 4: ADICIONANDO O RELEVO (MDT)
-# =============================================================================
-# Mude para True quando tiver o arquivo .tif do relevo real na mesma pasta!
-USAR_MDT_REAL = False  
 
-if USAR_MDT_REAL:
-    print("4. Carregando relevo real a partir de arquivo GeoTIFF externo...")
-    # Caminho do seu arquivo baixado (Ex: TOPODATA/INPE ou SRTM)
-    with rasterio.open("seu_arquivo_relevo.tif") as src:
-        # Lê o arquivo e força o redimensionamento exato para a mesma grade dos prédios
-        matriz_solo = src.read(1, out_shape=(rows, cols), resampling=rasterio.enums.Resampling.bilinear)
-else:
-    print("4. Gerando relevo simulado matemático (Padrão)...")
-    # Mantém a simulação matemática caso ainda não tenha o arquivo físico
-    x = np.linspace(0, 100, cols)
-    y = np.linspace(0, 50, rows)
-    X, Y = np.meshgrid(x, y)
-    matriz_solo = X + Y
+# ============================================================
+# 5. CARREGAMENTO DO MDT REAL
+# ============================================================
 
-# =============================================================================
-# PASSO 5: INTEGRAÇÃO FINAL (MDS) E PLOT
-# =============================================================================
-print("5. Combinando Relevo + Prédios (MDS)...")
+print("4. Carregando MDT real...")
+
+matriz_solo = np.zeros(
+    (rows, cols),
+    dtype="float32"
+)
+
+with rasterio.open(arquivo_mdt) as src:
+    reproject(
+        source=rasterio.band(src, 1),
+
+        destination=matriz_solo,
+
+        src_transform=src.transform,
+        src_crs=src.crs,
+
+        dst_transform=transform,
+        dst_crs="EPSG:31983",
+
+        resampling=Resampling.bilinear
+    )
+
+
+# ============================================================
+# 6. MDS = TERRENO + PRÉDIOS
+# ============================================================
+
+print("5. Gerando MDS...")
+
 matriz_mds = matriz_solo + matriz_predios
 
-print("6. Renderizando gráficos comparativos...")
-fig, ax = plt.subplots(1, 2, figsize=(14, 6))
 
-# Plot 1: Edificações isoladas
-im1 = ax[0].imshow(matriz_predios, cmap='Blues', extent=[bbox[0], bbox[2], bbox[1], bbox[3]])
-ax[0].set_title("Apenas Prédios (Obstáculos Isolados)")
-fig.colorbar(im1, ax=ax[0], label="Altura do Prédio (m)")
+# ============================================================
+# 7. VISUALIZAÇÃO
+# ============================================================
 
-# Plot 2: Modelo Digital de Superfície Combinado
-im2 = ax[1].imshow(matriz_mds, cmap='terrain', extent=[bbox[0], bbox[2], bbox[1], bbox[3]])
-ax[1].set_title("MDS Integrado (Terreno + Prédios)")
-fig.colorbar(im2, ax=ax[1], label="Altitude Absoluta (m)")
+print("6. Gerando gráficos...")
+
+extent = [
+    xmin,
+    xmax,
+    ymin,
+    ymax
+]
+
+fig, ax = plt.subplots(
+    1,
+    2,
+    figsize=(14, 6)
+)
+
+
+# Prédios
+im1 = ax[0].imshow(
+    matriz_predios,
+    cmap="Blues",
+    extent=extent,
+    origin="upper"
+)
+
+ax[0].set_title("Altura dos prédios")
+ax[0].set_xlabel("Easting (m)")
+ax[0].set_ylabel("Northing (m)")
+
+fig.colorbar(
+    im1,
+    ax=ax[0],
+    label="Altura (m)"
+)
+
+
+# MDS
+im2 = ax[1].imshow(
+    matriz_mds,
+    cmap="terrain",
+    extent=extent,
+    origin="upper"
+)
+
+ax[1].set_title("MDS: terreno + prédios")
+ax[1].set_xlabel("Easting (m)")
+ax[1].set_ylabel("Northing (m)")
+fig.colorbar(
+    im2,
+    ax=ax[1],
+    label="Altitude (m)"
+)
 
 plt.tight_layout()
 plt.show()
