@@ -34,10 +34,10 @@ from rasterio.windows import Window, from_bounds
 # ============================================================
 
 # Área de interesse (WGS84, graus) - padrão: Centro do Rio
-OESTE = -43.189
-SUL   = -22.909
-LESTE = -43.175
-NORTE = -22.899
+OESTE = -43.181665                    # -43.189
+SUL   = -22.530502                    # -22.909
+LESTE = -43.162913                    # -43.175
+NORTE = -22.510559                    # -22.899
 
 # Resolução da grade de saída (metros por pixel).
 # O terreno tem 30 m; a grade mais fina serve para os edifícios aparecerem.
@@ -46,7 +46,7 @@ RESOLUCAO = 2.0
 
 # True  -> terreno + edifícios (MDS)
 # False -> somente terreno (MDT)
-MOSTRAR_EDIFICIOS = True
+MOSTRAR_EDIFICIOS = False
 
 # Altura padrão para prédios sem 'height' nem 'building:levels' no OSM
 ALTURA_PADRAO = 12.0
